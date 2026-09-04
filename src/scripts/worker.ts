@@ -17,12 +17,16 @@ async function main() {
   }
 
   startWorker();
-  console.info("FlowForge worker polling for queued executions");
+  console.info("FlowForge worker polling for queued executions, schedules, and approval timeouts");
 
+  let shuttingDown = false;
   function shutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.info(`FlowForge worker received ${signal}, shutting down`);
-    stopWorker();
-    void closeDb().finally(() => process.exit(0));
+    void stopWorker()
+      .then(() => closeDb())
+      .finally(() => process.exit(0));
   }
 
   process.on("SIGINT", () => shutdown("SIGINT"));

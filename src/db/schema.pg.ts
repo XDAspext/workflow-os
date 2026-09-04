@@ -100,6 +100,7 @@ export const workflows = pgTable(
     publishedVersionId: text("published_version_id"),
     webhookToken: text("webhook_token"),
     verifyOnChain: boolean("verify_on_chain").notNull().default(false),
+    lastScheduledAt: tsNull("last_scheduled_at"),
     createdBy: text("created_by")
       .notNull()
       .references(() => users.id),

@@ -1,0 +1,9 @@
+{
+  "framework": "nextjs",
+  "crons": [
+    {
+      "path": "/api/ops/worker/tick",
+      "schedule": "* * * * *"
+    }
+  ]
+}

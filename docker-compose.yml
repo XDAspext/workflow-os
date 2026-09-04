@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: workflow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workflow}
@@ -19,6 +20,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
     ports:
       - "3000:3000"
     environment:
@@ -33,15 +36,30 @@ services:
       SEED_ON_BOOT: "false"
       ENABLE_EMBEDDED_WORKER: "false"
       ALLOW_SIGNUP: ${ALLOW_SIGNUP:-false}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
     depends_on:
       db:
         condition: service_healthy
     command: ["sh", "-c", "npm run db:migrate && npm start"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 40s
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
     environment:
       NODE_ENV: production
       APP_URL: ${APP_URL:?Set APP_URL to the public origin, e.g. https://flowforge.example.com}
@@ -51,9 +69,14 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       SEED_ON_BOOT: "false"
       ENABLE_EMBEDDED_WORKER: "false"
+      WORKER_POLL_MS: ${WORKER_POLL_MS:-1000}
+      WORKER_LOCK_MS: ${WORKER_LOCK_MS:-300000}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      disable: true
     command: ["sh", "-c", "npm run db:migrate && npm run worker"]
 
 volumes:

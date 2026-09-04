@@ -97,6 +97,7 @@ export const workflows = sqliteTable(
     publishedVersionId: text("published_version_id"),
     webhookToken: text("webhook_token"),
     verifyOnChain: integer("verify_on_chain", { mode: "boolean" }).notNull().default(false),
+    lastScheduledAt: timestampNull("last_scheduled_at"),
     createdBy: text("created_by")
       .notNull()
       .references(() => users.id),

@@ -101,6 +101,7 @@ Covered today:
 - Execution state transitions, branching, approval resume, continue-on-error
 - Provider fallback
 - Persisted execution against SQLite
+- Cancel, retry guards, schedule enqueue, worker crash isolation
 
 ---
 
@@ -137,7 +138,7 @@ Docs:
 
 ## Roadmap
 
-- Postgres dialect + Redis-backed queue
+- Redis-backed queue for multi-region workers
 - Native Slack / GitHub / Drive adapters
 - Full payment collection on the existing usage abstraction
 - Multi-item loop subgraphs with parallelism caps

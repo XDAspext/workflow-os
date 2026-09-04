@@ -10,6 +10,7 @@ import { ExecutionInspector } from "@/components/execution/inspector";
 import { explainFailure } from "@/domain/ops/failure";
 import { latestReceipt } from "@/server/services/receipts";
 import { VerificationPanel } from "@/components/verify/panel";
+import { RunActions } from "@/components/execution/run-actions";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const ctx = await requirePermission("executions.read");
@@ -35,7 +36,12 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
       <PageHeader
         title={workflow?.name ?? "Execution"}
         description={`${run.triggerType} · version locked · ${formatDateTime(run.createdAt)} · ${formatDuration(run.durationMs)}`}
-        actions={<StatusBadge status={run.status} />}
+        actions={
+          <div className="flex items-center gap-2">
+            <RunActions id={run.id} status={run.status} />
+            <StatusBadge status={run.status} />
+          </div>
+        }
       />
       {run.error && brief ? (
         <div className="mt-4 rounded-[var(--radius)] border border-danger/40 bg-[var(--danger-bg)] px-4 py-3 text-sm">

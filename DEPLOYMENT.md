@@ -55,6 +55,8 @@ Never commit these values. Never prefix them with `NEXT_PUBLIC_`. API keys stay 
 | `EXECUTE_INLINE` | no | Default off in production. Web enqueues; worker runs. |
 | `WORKER_POLL_MS` | no | Default `1000` in production |
 | `WORKER_LOCK_MS` | no | Stale lock reclaim window. Default 5 minutes. |
+| `WORKER_CONCURRENCY` | no | Parallel claimed runs per tick. Default `4` in production, `2` locally. Max `16`. |
+| `WORKER_SECRET` | for Vercel Cron / HTTP tick | Bearer token for `GET|POST /api/ops/worker/tick`. Vercel Cron can use `CRON_SECRET` instead. |
 | `DATABASE_POOL_MAX` | no | postgres.js pool size. Default `8`. |
 | `DATABASE_SSL` | no | `require` or `disable`. Hosted Postgres usually needs TLS. |
 | `COOKIE_SECURE` | no | Default `true` when `NODE_ENV=production`. Set `false` only for a temporary HTTP demo so the session cookie is stored. HTTPS is required for a real public demo. |
@@ -143,7 +145,7 @@ NODE_ENV=production npm start
 
 `npm start` serves the Next.js app. In production the embedded poller is **off**. If you set `ENABLE_EMBEDDED_WORKER=true`, the web process will also poll — that is a last-resort single-box mode, not the recommended demo architecture.
 
-Health check: `GET /api/health` → `{ ok: true, service: "workflow-os", db: "postgres" }`.
+Health check: `GET /api/health` → `{ ok: true, service: "workflow-os", db: "postgres" }`. The handler pings the database; a failed ping returns `503`.
 
 ---
 
@@ -167,10 +169,16 @@ The worker:
 
 - loads `.env` from the working directory if present
 - asserts production config (Postgres, `APP_URL`, secrets, no `SEED_ON_BOOT`)
-- polls `queued` executions and due `waiting` rows
-- claims rows so two workers cannot run the same execution
+- polls `queued` executions and due `waiting` delay rows
+- enqueues published cron (`schedule.trigger`) workflows at most once per UTC minute
+- expires timed-out approvals
+- claims rows (`SKIP LOCKED` on PostgreSQL) so two workers cannot run the same execution
+- runs up to `WORKER_CONCURRENCY` claimed executions in parallel
+- marks crashed runs `failed` instead of leaving them locked
 - re-queues stale `running` locks after `WORKER_LOCK_MS`
-- handles `SIGINT` / `SIGTERM`
+- handles `SIGINT` / `SIGTERM` and waits for the in-flight tick
+
+If the web app is on Vercel, run `npm run worker` on a second host **or** set `WORKER_SECRET` / `CRON_SECRET` and let `vercel.json` hit `/api/ops/worker/tick` every minute. Long workflows still belong on the dedicated worker; the HTTP tick is a fallback with a 60s function budget.
 
 systemd example:
 

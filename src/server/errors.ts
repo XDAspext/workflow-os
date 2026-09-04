@@ -33,9 +33,21 @@ export function toErrorResponse(error: unknown): NextResponse {
 }
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
+const MAX_BUCKETS = 10_000;
+
+function pruneRateLimitBuckets(now: number): void {
+  if (buckets.size < 512) return;
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt < now) buckets.delete(key);
+  }
+  if (buckets.size > MAX_BUCKETS) {
+    buckets.clear();
+  }
+}
 
 export function rateLimit(key: string, limit = 20, windowMs = 60_000): void {
   const now = Date.now();
+  pruneRateLimitBuckets(now);
   const current = buckets.get(key);
   if (!current || current.resetAt < now) {
     buckets.set(key, { count: 1, resetAt: now + windowMs });

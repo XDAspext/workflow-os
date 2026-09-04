@@ -1,15 +1,40 @@
-import { and, desc, eq, lt, or, sql } from "drizzle-orm";
-import { ensureMigrated } from "@/db/client";
+import { and, desc, eq, isNotNull, lt, lte, or, sql } from "drizzle-orm";
+import { ensureMigrated, getPgSql } from "@/db/client";
 import { approvals, executionSteps, executions, secrets, usageEvents, workflowVersions, workflows } from "@/db/schema";
 import { id } from "@/domain/ids";
-import { NotFoundError, ValidationError } from "@/domain/permissions";
+import { ConflictError, NotFoundError, ValidationError } from "@/domain/permissions";
 import { runWorkflow } from "@/domain/engine/run";
 import { resumeWorkflow } from "@/domain/engine/resume";
 import { decryptSecret } from "@/server/crypto";
 import { writeAudit } from "@/server/audit";
 import { validateGraph } from "@/domain/workflow/validate";
 import type { EngineStepResult } from "@/domain/engine/types";
-import { executeInlineOnEnqueue, publicAppUrl, workerLockTimeoutMs } from "@/server/config";
+import {
+  executeInlineOnEnqueue,
+  publicAppUrl,
+  workerConcurrency,
+  workerLockTimeoutMs,
+} from "@/server/config";
+
+const ACTIVE_RUN = new Set(["queued", "running", "waiting"]);
+const RETRYABLE = new Set(["failed", "cancelled", "timed_out", "success", "waiting"]);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function branchFromUnknown(value: unknown): string | undefined {
+  const record = asRecord(value);
+  return typeof record?.branch === "string" ? record.branch : undefined;
+}
+
+function errorPayload(error: unknown, nodeId?: string): { message: string; type: string; nodeId?: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const type = error instanceof Error ? error.name : "Error";
+  return nodeId ? { message, type, nodeId } : { message, type };
+}
 
 export async function enqueueExecution(input: {
   orgId: string;
@@ -82,33 +107,65 @@ async function reclaimStaleLocks(): Promise<void> {
     .where(and(eq(executions.status, "running"), lt(executions.lockedAt, cutoff)));
 }
 
-export async function processQueuedExecutions(limit = 5): Promise<number> {
+async function claimDueExecutions(limit: number, workerId: string, now: Date): Promise<string[]> {
+  const pg = getPgSql();
+  if (pg) {
+    const rows = await pg<{ id: string }[]>`
+      UPDATE executions
+      SET
+        status = 'running',
+        locked_at = ${now},
+        locked_by = ${workerId},
+        started_at = COALESCE(started_at, ${now})
+      WHERE id IN (
+        SELECT id FROM executions
+        WHERE status = 'queued'
+           OR (status = 'waiting' AND wait_until IS NOT NULL AND wait_until <= ${now})
+        ORDER BY created_at
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING id
+    `;
+    return rows.map((row) => row.id);
+  }
+
   const db = await ensureMigrated();
-  await reclaimStaleLocks();
-  const workerId = `worker-${process.pid}`;
-  const now = new Date();
   const queued = await db.query.executions.findMany({
     where: eq(executions.status, "queued"),
     orderBy: [executions.createdAt],
     limit,
   });
-  const due = await db.query.executions.findMany({
-    where: eq(executions.status, "waiting"),
+  const delayed = await db.query.executions.findMany({
+    where: and(
+      eq(executions.status, "waiting"),
+      isNotNull(executions.waitUntil),
+      lte(executions.waitUntil, now),
+    ),
+    orderBy: [executions.createdAt],
     limit,
   });
-  const delayed = due.filter((row) => row.waitUntil && row.waitUntil.getTime() <= now.getTime());
-  let processed = 0;
+  const ids: string[] = [];
   for (const row of [...queued, ...delayed]) {
+    if (ids.length >= limit) break;
     const claimed = await db
       .update(executions)
       .set({ status: "running", lockedAt: now, lockedBy: workerId, startedAt: row.startedAt ?? now })
       .where(and(eq(executions.id, row.id), or(eq(executions.status, "queued"), eq(executions.status, "waiting"))))
       .returning({ id: executions.id });
-    if (claimed.length === 0) continue;
-    await runPersistedExecution(row.id);
-    processed += 1;
+    if (claimed[0]) ids.push(claimed[0].id);
   }
-  return processed;
+  return ids;
+}
+
+export async function processQueuedExecutions(limit = workerConcurrency()): Promise<number> {
+  const batch = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 16) : workerConcurrency();
+  await reclaimStaleLocks();
+  const workerId = `worker-${process.pid}`;
+  const claimed = await claimDueExecutions(batch, workerId, new Date());
+  if (claimed.length === 0) return 0;
+  const results = await Promise.allSettled(claimed.map((executionId) => runPersistedExecution(executionId)));
+  return results.filter((result) => result.status === "fulfilled").length;
 }
 
 export function kickExecution(executionId: string): void {
@@ -116,14 +173,65 @@ export function kickExecution(executionId: string): void {
   void runPersistedExecution(executionId);
 }
 
-export async function runPersistedExecution(executionId: string): Promise<void> {
+async function failRunningExecution(executionId: string, error: unknown): Promise<void> {
   const db = await ensureMigrated();
   const execution = await db.query.executions.findFirst({ where: eq(executions.id, executionId) });
+  const ended = new Date();
+  await db
+    .update(executions)
+    .set({
+      status: "failed",
+      error: errorPayload(error),
+      endedAt: ended,
+      durationMs: execution?.startedAt ? ended.getTime() - execution.startedAt.getTime() : null,
+      lockedAt: null,
+      lockedBy: null,
+    })
+    .where(and(eq(executions.id, executionId), eq(executions.status, "running")));
+}
+
+export async function runPersistedExecution(executionId: string): Promise<void> {
+  try {
+    await executeClaimedRun(executionId);
+  } catch (error) {
+    console.error("[execution]", executionId, error);
+    await failRunningExecution(executionId, error);
+  }
+}
+
+async function executeClaimedRun(executionId: string): Promise<void> {
+  const db = await ensureMigrated();
+  let execution = await db.query.executions.findFirst({ where: eq(executions.id, executionId) });
   if (!execution) return;
+  if (execution.status === "queued" || execution.status === "waiting") {
+    const now = new Date();
+    const claimed = await db
+      .update(executions)
+      .set({
+        status: "running",
+        lockedAt: now,
+        lockedBy: `inline-${process.pid}`,
+        startedAt: execution.startedAt ?? now,
+      })
+      .where(
+        and(
+          eq(executions.id, executionId),
+          or(eq(executions.status, "queued"), eq(executions.status, "waiting")),
+        ),
+      )
+      .returning({ id: executions.id });
+    if (claimed.length === 0) return;
+    execution = await db.query.executions.findFirst({ where: eq(executions.id, executionId) });
+    if (!execution) return;
+  }
+  if (execution.status !== "running") return;
   const version = await db.query.workflowVersions.findFirst({
     where: eq(workflowVersions.id, execution.workflowVersionId),
   });
-  if (!version) return;
+  if (!version) {
+    await failRunningExecution(executionId, new Error("Workflow version not found"));
+    return;
+  }
 
   const orgSecrets = await db.query.secrets.findMany({
     where: eq(secrets.organizationId, execution.organizationId),
@@ -193,6 +301,7 @@ export async function runPersistedExecution(executionId: string): Promise<void> 
   };
 
   const engineEnv = { APP_URL: publicAppUrl() };
+  const resumeOutput = previousOutputs[execution.resumeFrom ?? ""] ?? execution.output;
   const result = execution.resumeFrom
     ? await resumeWorkflow({
         graph: version.definition.graph,
@@ -201,7 +310,8 @@ export async function runPersistedExecution(executionId: string): Promise<void> 
         env: engineEnv,
         decision: {
           nodeId: execution.resumeFrom,
-          output: previousOutputs[execution.resumeFrom] ?? execution.output,
+          output: resumeOutput,
+          branch: branchFromUnknown(execution.output) ?? branchFromUnknown(resumeOutput),
         },
         hooks: {
           secrets: async (name) => secretMap.get(name) ?? null,
@@ -237,7 +347,7 @@ export async function runPersistedExecution(executionId: string): Promise<void> 
       });
 
   const ended = new Date();
-  await db
+  const written = await db
     .update(executions)
     .set({
       status: result.status,
@@ -250,7 +360,10 @@ export async function runPersistedExecution(executionId: string): Promise<void> 
       lockedAt: null,
       lockedBy: null,
     })
-    .where(eq(executions.id, execution.id));
+    .where(and(eq(executions.id, execution.id), eq(executions.status, "running")))
+    .returning({ id: executions.id });
+
+  if (written.length === 0) return;
 
   if (result.status !== "waiting") {
     try {
@@ -281,6 +394,14 @@ export async function decideApproval(input: {
       : input.decision === "reject"
         ? "rejected"
         : "changes_requested";
+  const branch =
+    input.decision === "approve" ? "approved" : input.decision === "reject" ? "rejected" : "changes";
+  const output = {
+    decision: input.decision,
+    comment: input.comment ?? null,
+    resolvedBy: input.userId,
+    branch,
+  };
   await db
     .update(approvals)
     .set({
@@ -294,19 +415,19 @@ export async function decideApproval(input: {
     .update(executionSteps)
     .set({
       status: "success",
-      output: { decision: input.decision, comment: input.comment ?? null, resolvedBy: input.userId },
+      output,
       endedAt: new Date(),
     })
     .where(eq(executionSteps.id, approval.stepId));
-  const branch =
-    input.decision === "approve" ? "approved" : input.decision === "reject" ? "rejected" : "changes";
   await db
     .update(executions)
     .set({
       status: "queued",
       resumeFrom: approval.nodeId,
-      output: { decision: input.decision, comment: input.comment ?? null, resolvedBy: input.userId },
+      output,
       waitUntil: null,
+      lockedAt: null,
+      lockedBy: null,
     })
     .where(eq(executions.id, approval.executionId));
   await writeAudit({
@@ -317,20 +438,120 @@ export async function decideApproval(input: {
     resourceId: approval.id,
     metadata: { decision: input.decision },
   });
-  // Keep branch on the execution by storing it in output; the resume path uses
-  // resumeDecision.branch when provided. Patch the next process to read it.
+  return approval.executionId;
+}
+
+export async function cancelExecution(input: {
+  orgId: string;
+  userId: string;
+  executionId: string;
+}): Promise<void> {
+  const db = await ensureMigrated();
+  const run = await db.query.executions.findFirst({
+    where: and(eq(executions.id, input.executionId), eq(executions.organizationId, input.orgId)),
+  });
+  if (!run) throw new NotFoundError("Execution not found");
+  if (!ACTIVE_RUN.has(run.status)) {
+    throw new ValidationError("Only queued, running, or waiting runs can be cancelled.");
+  }
+  const ended = new Date();
+  const cancelled = await db
+    .update(executions)
+    .set({
+      status: "cancelled",
+      error: { message: "Cancelled by operator", type: "Cancelled" },
+      endedAt: ended,
+      durationMs: run.startedAt ? ended.getTime() - run.startedAt.getTime() : null,
+      lockedAt: null,
+      lockedBy: null,
+      waitUntil: null,
+    })
+    .where(and(eq(executions.id, run.id), or(eq(executions.status, "queued"), eq(executions.status, "running"), eq(executions.status, "waiting"))))
+    .returning({ id: executions.id });
+  if (cancelled.length === 0) {
+    throw new ConflictError("This run already finished.");
+  }
+  await db
+    .update(approvals)
+    .set({ status: "cancelled", resolvedBy: input.userId, resolvedAt: ended, comment: "Run cancelled" })
+    .where(and(eq(approvals.executionId, run.id), eq(approvals.status, "pending")));
+  await writeAudit({
+    organizationId: input.orgId,
+    userId: input.userId,
+    action: "execution.cancelled",
+    resourceType: "execution",
+    resourceId: run.id,
+  });
+}
+
+export async function retryExecution(input: {
+  orgId: string;
+  executionId: string;
+  fromNodeId?: string;
+}): Promise<{ id: string; fromNodeId: string | null; status: "queued" }> {
+  const db = await ensureMigrated();
+  const run = await db.query.executions.findFirst({
+    where: and(eq(executions.id, input.executionId), eq(executions.organizationId, input.orgId)),
+  });
+  if (!run) throw new NotFoundError("Execution not found");
+  if (run.status === "running") {
+    throw new ConflictError("This run is still executing. Cancel it first, then retry.");
+  }
+  if (run.status === "queued") {
+    throw new ValidationError("This run is already queued.");
+  }
+  if (!RETRYABLE.has(run.status)) {
+    throw new ValidationError("This run cannot be retried from its current state.");
+  }
+  const fromNodeId = input.fromNodeId ?? run.error?.nodeId ?? run.resumeFrom ?? undefined;
+  if (fromNodeId) {
+    await db
+      .update(executionSteps)
+      .set({ status: "pending", error: null, output: null, endedAt: null })
+      .where(and(eq(executionSteps.executionId, run.id), eq(executionSteps.nodeId, fromNodeId)));
+  }
   await db
     .update(executions)
     .set({
-      output: {
-        decision: input.decision,
-        comment: input.comment ?? null,
-        resolvedBy: input.userId,
-        branch,
-      },
+      status: "queued",
+      error: null,
+      resumeFrom: fromNodeId ?? null,
+      waitUntil: null,
+      lockedAt: null,
+      lockedBy: null,
     })
-    .where(eq(executions.id, approval.executionId));
-  return approval.executionId;
+    .where(eq(executions.id, run.id));
+  return { id: run.id, fromNodeId: fromNodeId ?? null, status: "queued" };
+}
+
+export async function expireTimedOutApprovals(now = new Date()): Promise<number> {
+  const db = await ensureMigrated();
+  const due = await db.query.approvals.findMany({
+    where: and(eq(approvals.status, "pending"), isNotNull(approvals.timeoutAt), lt(approvals.timeoutAt, now)),
+    limit: 50,
+  });
+  let processed = 0;
+  for (const approval of due) {
+    const updated = await db
+      .update(approvals)
+      .set({ status: "timed_out", resolvedAt: now, comment: "Timed out" })
+      .where(and(eq(approvals.id, approval.id), eq(approvals.status, "pending")))
+      .returning({ id: approvals.id });
+    if (updated.length === 0) continue;
+    await db
+      .update(executions)
+      .set({
+        status: "timed_out",
+        error: { message: "Approval timed out", type: "TimeoutError", nodeId: approval.nodeId },
+        endedAt: now,
+        lockedAt: null,
+        lockedBy: null,
+        waitUntil: null,
+      })
+      .where(and(eq(executions.id, approval.executionId), eq(executions.status, "waiting")));
+    processed += 1;
+  }
+  return processed;
 }
 
 export async function dashboardStats(orgId: string) {

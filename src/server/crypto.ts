@@ -52,6 +52,13 @@ export function verifySignature(payload: string, signature: string, secret?: str
   return timingSafeEqual(expected, actual);
 }
 
+export function secureCompare(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 export function randomToken(bytes = 24): string {
   return randomBytes(bytes).toString("hex");
 }

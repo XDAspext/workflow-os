@@ -56,6 +56,7 @@ export const PG_STATEMENTS = [
     published_version_id TEXT,
     webhook_token TEXT,
     verify_on_chain BOOLEAN NOT NULL DEFAULT FALSE,
+    last_scheduled_at TIMESTAMPTZ,
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -237,6 +238,7 @@ export const PG_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS usage_org_created_idx ON usage_events(organization_id, created_at)`,
   `ALTER TABLE organizations ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE`,
   `ALTER TABLE workflows ADD COLUMN IF NOT EXISTS verify_on_chain BOOLEAN NOT NULL DEFAULT FALSE`,
+  `ALTER TABLE workflows ADD COLUMN IF NOT EXISTS last_scheduled_at TIMESTAMPTZ`,
 ];
 
 export async function applyPgSchema(sql: Sql): Promise<void> {
@@ -248,5 +250,8 @@ export async function applyPgSchema(sql: Sql): Promise<void> {
   );
   await sql.unsafe(
     `INSERT INTO schema_migrations (id) VALUES ('0001_execution_receipts') ON CONFLICT (id) DO NOTHING`,
+  );
+  await sql.unsafe(
+    `INSERT INTO schema_migrations (id) VALUES ('0002_schedule_cursor') ON CONFLICT (id) DO NOTHING`,
   );
 }

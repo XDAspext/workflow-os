@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS workflows (
   status TEXT NOT NULL DEFAULT 'draft',
   published_version_id TEXT,
   webhook_token TEXT,
+  verify_on_chain BOOLEAN NOT NULL DEFAULT FALSE,
+  last_scheduled_at TIMESTAMPTZ,
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

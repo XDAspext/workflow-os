@@ -52,6 +52,7 @@ const STATEMENTS = [
     published_version_id TEXT,
     webhook_token TEXT,
     verify_on_chain INTEGER NOT NULL DEFAULT 0,
+    last_scheduled_at INTEGER,
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -249,6 +250,11 @@ export async function applySchema(client: Client): Promise<void> {
     await client.execute(
       "ALTER TABLE workflows ADD COLUMN verify_on_chain INTEGER NOT NULL DEFAULT 0",
     );
+  } catch {
+    // Column already exists on databases created after this patch.
+  }
+  try {
+    await client.execute("ALTER TABLE workflows ADD COLUMN last_scheduled_at INTEGER");
   } catch {
     // Column already exists on databases created after this patch.
   }

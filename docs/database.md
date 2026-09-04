@@ -21,6 +21,6 @@ Apply schema: `npm run db:migrate` or `ensureMigrated()` on boot. SQLite uses `C
 
 Organizations have `is_demo` for the isolated FlowForge Demo workspace.
 
-Workflows have `verify_on_chain` (default false). When a run finishes, FlowForge writes `execution_receipts` with a SHA-256 root of a canonical execution snapshot. Inputs and outputs are hashed, not stored in the receipt. Blockchain, if enabled, stores only that root.
+Workflows have `verify_on_chain` (default false) and `last_scheduled_at` (worker cursor so `schedule.trigger` fires at most once per UTC minute). When a run finishes, FlowForge writes `execution_receipts` with a SHA-256 root of a canonical execution snapshot. Inputs and outputs are hashed, not stored in the receipt. Blockchain, if enabled, stores only that root.
 
 Indexes cover org-scoped listing, webhook tokens, execution status, and audit time.

@@ -89,6 +89,23 @@ export function getClient(): Client {
   return sqliteCache.client;
 }
 
+export function getPgSql(): Sql | null {
+  const url = databaseUrl();
+  if (!isPostgresUrl(url)) return null;
+  getDb();
+  return pgCache?.sql ?? null;
+}
+
+export async function pingDatabase(): Promise<void> {
+  if (isPostgresUrl(databaseUrl())) {
+    const sql = getPgSql();
+    if (!sql) throw new Error("PostgreSQL client not initialized");
+    await sql`select 1 as ok`;
+    return;
+  }
+  await getClient().execute("SELECT 1");
+}
+
 let migrated = false;
 
 export async function ensureMigrated(): Promise<Database> {

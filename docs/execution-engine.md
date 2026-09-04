@@ -19,4 +19,13 @@ Human approval:
 - User decides in `/approvals`
 - Execution is re-queued with `resumeFrom` and the decision branch
 
-The worker claims `queued` rows and due `waiting` delays. It does not run inside the original HTTP request lifecycle except as an optional local kick after enqueue.
+The worker claims `queued` rows and due `waiting` delays. PostgreSQL uses `FOR UPDATE SKIP LOCKED` so multiple workers do not run the same row. SQLite uses a compare-and-set update. Claimed runs execute in parallel up to `WORKER_CONCURRENCY`.
+
+If a run throws, the worker marks it `failed` and releases the lock instead of leaving it `running` until stale-lock reclaim. A cancelled run is not overwritten when the in-flight worker finishes.
+
+The same tick also:
+
+- Enqueues published `schedule.trigger` workflows whose cron matches the current UTC minute (`last_scheduled_at` prevents double fire)
+- Expires pending approvals past `timeout_at` and marks the execution `timed_out`
+
+It does not run inside the original HTTP request lifecycle except as an optional local kick after enqueue.

@@ -1,14 +1,11 @@
 # FlowForge Deployment
 
-FlowForge is configured for production deployment using Vercel with PostgreSQL provided by Supabase.
+See [DEPLOYMENT.md](../DEPLOYMENT.md) for the full production runbook (Postgres, worker process, Docker, health checks, and optional Vercel Cron).
 
-Production configuration includes:
+Production pieces:
 
-- Vercel application deployment
-- Supabase PostgreSQL database
-- Environment-based configuration
-- Production authentication secrets
-- Database connection configuration
-- PostgreSQL schema initialization
+- Next.js web app
+- PostgreSQL
+- A separate worker (`npm run worker`) that claims queued runs, fires cron schedules, and expires approvals
 
-Local development can continue using the supported SQLite configuration.
+Vercel can host the web app. Long-running executions still need the dedicated worker, or the authenticated `/api/ops/worker/tick` fallback. Local development continues to use SQLite.

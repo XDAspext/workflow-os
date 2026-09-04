@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { databaseUrl, isPostgresUrl, webhookUrl } from "@/server/config";
+import { databaseUrl, isPostgresUrl, webhookUrl, workerConcurrency } from "@/server/config";
 
 describe("database dialect", () => {
   it("detects postgres URLs and file URLs", () => {
@@ -31,5 +31,22 @@ describe("database dialect", () => {
 describe("webhook URLs", () => {
   it("build from APP_URL", () => {
     expect(webhookUrl("abc123")).toBe("http://localhost:3000/api/webhooks/abc123");
+  });
+});
+
+describe("worker concurrency", () => {
+  it("caps at 16 and falls back when unset", () => {
+    const previous = process.env.WORKER_CONCURRENCY;
+    try {
+      delete process.env.WORKER_CONCURRENCY;
+      expect(workerConcurrency()).toBeGreaterThan(0);
+      process.env.WORKER_CONCURRENCY = "99";
+      expect(workerConcurrency()).toBe(16);
+      process.env.WORKER_CONCURRENCY = "3";
+      expect(workerConcurrency()).toBe(3);
+    } finally {
+      if (previous === undefined) delete process.env.WORKER_CONCURRENCY;
+      else process.env.WORKER_CONCURRENCY = previous;
+    }
   });
 });

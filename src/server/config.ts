@@ -121,6 +121,15 @@ export function workerLockTimeoutMs(): number {
   return Number.isFinite(n) && n >= 10_000 ? n : 5 * 60_000;
 }
 
+export function workerConcurrency(): number {
+  const n = Number(process.env.WORKER_CONCURRENCY ?? (isProduction() ? 4 : 2));
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 16) : 4;
+}
+
+export function workerSharedSecret(): string | null {
+  return envString("WORKER_SECRET") || envString("CRON_SECRET") || null;
+}
+
 export function postgresSsl(url: string): boolean | { rejectUnauthorized: boolean } | undefined {
   if (process.env.DATABASE_SSL === "disable") return false;
   if (process.env.DATABASE_SSL === "require") {

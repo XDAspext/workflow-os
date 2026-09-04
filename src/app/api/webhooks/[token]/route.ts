@@ -44,9 +44,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
 }
 
 export async function GET(_request: Request, { params }: { params: Promise<{ token: string }> }) {
-  const { token } = await params;
-  const db = await ensureMigrated();
-  const workflow = await db.query.workflows.findFirst({ where: eq(workflows.webhookToken, token) });
-  if (!workflow) return NextResponse.json({ error: "Unknown webhook" }, { status: 404 });
-  return NextResponse.json({ ok: true, workflow: workflow.name });
+  try {
+    const { token } = await params;
+    rateLimit(`webhook-get:${token}`, 30, 60_000);
+    const db = await ensureMigrated();
+    const workflow = await db.query.workflows.findFirst({ where: eq(workflows.webhookToken, token) });
+    if (!workflow || workflow.status === "archived") {
+      return NextResponse.json({ error: "Unknown webhook" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, workflow: workflow.name, status: workflow.status });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
 }

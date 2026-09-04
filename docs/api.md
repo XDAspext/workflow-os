@@ -20,7 +20,8 @@ Authorization is enforced on the server (`requirePermission`). Do not trust the 
 ## Executions
 
 - `GET /api/executions/:id` — includes the latest receipt when present
-- `POST /api/executions/:id/retry` — `{ "fromNodeId"?: string }`
+- `POST /api/executions/:id/retry` — `{ "fromNodeId"?: string }`. Rejects runs that are still `queued` or `running`.
+- `POST /api/executions/:id/cancel` — queued, running, or waiting runs only. In-flight workers will not overwrite a cancelled row.
 - `GET /api/executions/compare?a=&b=`
 - `GET /api/executions/:id/receipt` — append-only receipts for the run
 - `POST /api/executions/:id/receipt` — `{ "action": "retry" }` retries a failed anchor
@@ -36,3 +37,8 @@ Authorization is enforced on the server (`requirePermission`). Do not trust the 
 - `POST /api/webhooks/:token` — published workflows only. Paused workflows return 423 and do not start a run. `Authorization` headers are stripped from stored payloads.
 
 Rate limits apply to auth and webhooks.
+
+## Health and worker
+
+- `GET /api/health` — migrates if needed and pings the database. `503` when the database is unreachable.
+- `GET|POST /api/ops/worker/tick` — one worker tick: due cron schedules, expired approvals, then queued runs. In production requires `Authorization: Bearer $WORKER_SECRET` or `CRON_SECRET`. Used by the dedicated worker and optionally by Vercel Cron.

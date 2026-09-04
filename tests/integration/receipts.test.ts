@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
-import { enqueueExecution, runPersistedExecution } from "@/server/services/executions";
+import { enqueueExecution, retryExecution, runPersistedExecution } from "@/server/services/executions";
 import { createWorkflow, publishWorkflow, setWorkflowVerifyOnChain } from "@/server/services/workflows";
 import { createReceiptForExecution, latestReceipt, verifyExecution } from "@/server/services/receipts";
 import { ensureMigrated, resetDbCache } from "@/db/client";
@@ -117,6 +117,7 @@ describe("execution receipts", () => {
     });
     await runPersistedExecution(executionId);
     const first = await latestReceipt(executionId, orgId);
+    await retryExecution({ orgId, executionId });
     await runPersistedExecution(executionId);
     const second = await latestReceipt(executionId, orgId);
     expect(first?.sequence).toBe(1);
